@@ -1124,6 +1124,45 @@ def get_interface_name_from_csv(csv_file: str, if_map: Dict[str, Dict[str, str]]
     return ""
 
 
+def capture_kernel_messages(output_file: str) -> str:
+    """Capture kernel messages (dmesg) with timestamps to a file."""
+    kernel_log_file = output_file.replace(".csv", "_kernel.log")
+    
+    try:
+        log_msg(f"[INFO] Capturing kernel messages to: {kernel_log_file}", None)
+        
+        # Get kernel messages with timestamps (relative to boot)
+        result = subprocess.run(["dmesg", "-T"], capture_output=True, text=True, timeout=30)
+        
+        if result.returncode == 0:
+            with open(kernel_log_file, "w", encoding="utf-8") as f:
+                f.write("=" * 80 + "\n")
+                f.write(f"Kernel Messages (dmesg) Capture\n")
+                f.write(f"Captured: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}\n")
+                f.write("=" * 80 + "\n\n")
+                f.write(result.stdout)
+            
+            # Count link-related messages
+            link_messages = [line for line in result.stdout.splitlines() if "link" in line.lower() or "carrier" in line.lower()]
+            
+            log_msg(f"[SUCCESS] Kernel messages captured: {kernel_log_file}", None)
+            log_msg(f"[INFO] Found {len(link_messages)} link-related kernel messages.", None)
+            
+            return kernel_log_file
+        else:
+            log_msg(f"[ERROR] Failed to capture kernel messages: {result.stderr}", None)
+            return ""
+    except FileNotFoundError:
+        log_msg("[ERROR] dmesg command not found.", None)
+        return ""
+    except subprocess.TimeoutExpired:
+        log_msg("[ERROR] Kernel message capture timed out.", None)
+        return ""
+    except Exception as e:
+        log_msg(f"[ERROR] Failed to capture kernel messages: {e}", None)
+        return ""
+
+
 def collect_amber_data(device: str, port: Optional[int] = None, output_file: str = "amber_data.csv", if_map: Optional[Dict[str, Dict[str, str]]] = None) -> str:
     """Collect amBER data using mlxlink and save to CSV file. Returns final filename with link and interface name."""
     try:
@@ -1279,12 +1318,20 @@ def main():
                 final_file = collect_amber_data(device, args.port, output_file, if_map)
                 if final_file:
                     collected_files.append(final_file)
+                    # Capture kernel messages for each device
+                    kernel_log = capture_kernel_messages(final_file)
                 else:
                     log_msg(f"[WARN] Failed to collect from {device}, continuing...", None)
             
             if not collected_files:
                 log_msg("[ERROR] Failed to collect data from any device.", None)
                 return
+            
+            # Capture overall kernel messages after collection
+            if collected_files:
+                overall_kernel_log = capture_kernel_messages(collected_files[0].replace("_mt", "_all_devices"))
+                if overall_kernel_log:
+                    log_msg(f"[INFO] Overall kernel messages captured: {overall_kernel_log}", None)
         else:
             # Collect from specified device
             # Check if MST is running
@@ -1311,6 +1358,8 @@ def main():
             if not final_file:
                 return
             collected_files = [final_file]
+            # Capture kernel messages for this device
+            kernel_log = capture_kernel_messages(final_file)
         
         # Add collected files to the files list
         if not args.files:
@@ -1338,9 +1387,18 @@ def main():
     processed_files = []
     created_templates = []
     errors = []
+    kernel_logs = []
 
     log_msg(f"[INFO] Processing {len(file_paths)} file(s)...", None)
     log_msg("", None)
+    
+    # Capture kernel messages once at the start (for all files)
+    if file_paths:
+        # Use first file's name as base for kernel log
+        first_file = file_paths[0]
+        kernel_log = capture_kernel_messages(first_file)
+        if kernel_log:
+            kernel_logs.append(kernel_log)
 
     for path in file_paths:
         log_path = f"{path}.log"
@@ -1407,6 +1465,20 @@ def main():
         log_msg(f"[ERROR] {len(errors)} file(s) had errors:", None)
         for file_path, error_msg in errors:
             log_msg(f"  ✗ {file_path}: {error_msg}", None)
+    
+    if kernel_logs:
+        log_msg("", None)
+        log_msg(f"[INFO] Kernel messages captured in {len(kernel_logs)} file(s):", None)
+        for kernel_log in kernel_logs:
+            log_msg(f"  • {kernel_log}", None)
+        log_msg("", None)
+        log_msg("  View kernel messages:", None)
+        for kernel_log in kernel_logs:
+            log_msg(f"    cat {kernel_log}", None)
+        log_msg("", None)
+        log_msg("  Search for link events in kernel logs:", None)
+        for kernel_log in kernel_logs:
+            log_msg(f"    grep -i 'link' {kernel_log}", None)
     
     log_msg("", None)
     log_msg("=" * 80, None)
